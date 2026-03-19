@@ -1,0 +1,38 @@
+version: '3.8'
+services:
+  db:
+    image: mariadb:11.4
+    restart: always
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_password_change_me}
+      MYSQL_DATABASE: ${DB_NAME:-birthday_db}
+      MYSQL_USER: ${DB_USER:-bot_admin}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-change_me}
+    volumes:
+      - ./mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  bot:
+    build:
+      context: ./app
+      dockerfile: DockerFile
+    restart: always
+    env_file: .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-birthday_db}
+      DB_USER: ${DB_USER:-bot_admin}
+      DB_PASSWORD: ${DB_PASSWORD:-change_me}
+      TZ: ${TZ:-Europe/Amsterdam}
+    depends_on:
+      - db
+    ports:
+      - "8443:8443"

@@ -1,0 +1,5 @@
+flask
+mysql-connector-python
+apscheduler
+requests
+python-dotenv
