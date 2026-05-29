@@ -16,6 +16,26 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 TZ = ZoneInfo(os.getenv("TZ", "Europe/Amsterdam"))
 
 
+def parse_birthday(text: str) -> tuple[str, str]:
+    """Parse DD-MM-YYYY or DD-MM. Returns (db_value YYYY-MM-DD, display_str).
+    Year 1900 is used as a sentinel when no year is provided."""
+    text = text.strip()
+    try:
+        parsed = datetime.strptime(text, "%d-%m-%Y")
+        return parsed.strftime("%Y-%m-%d"), text
+    except ValueError:
+        pass
+    parsed = datetime.strptime(text, "%d-%m")  # defaults to year 1900
+    return parsed.strftime("%Y-%m-%d"), text
+
+
+def format_birthday(date_obj) -> str:
+    """Display a birthday date. Omits year when stored as 1900 (unknown)."""
+    if date_obj.year == 1900:
+        return date_obj.strftime("%d-%m")
+    return date_obj.strftime("%d-%m-%Y")
+
+
 def get_db_connection(retries=5, delay_seconds=2):
     """Connects to MariaDB/MySQL with retries to survive slow container startup."""
     last_error = None
@@ -74,7 +94,7 @@ def init_database():
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎂 Birthday Bot\n\n"
-        "/add Name DD-MM-YYYY — save a birthday\n"
+        "/add Name DD-MM-YYYY or DD-MM — save a birthday\n"
         "/bulkadd — save multiple birthdays at once\n"
         "/list — show all saved birthdays\n"
         "/remove Name — delete a birthday\n"
@@ -89,8 +109,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.args) < 2:
             raise ValueError("Missing arguments")
         name, bday = context.args[0], context.args[1]
-        parsed = datetime.strptime(bday, "%d-%m-%Y")
-        bday_db = parsed.strftime("%Y-%m-%d")
+        bday_db, bday_display = parse_birthday(bday)
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -102,10 +121,10 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        await update.message.reply_text(f"✅ Saved {name}'s birthday ({bday})!")
+        await update.message.reply_text(f"✅ Saved {name}'s birthday ({bday_display})!")
     except Exception as e:
         logging.warning("/add failed: %s", e)
-        await update.message.reply_text("❌ Error. Use: /add Name DD-MM-YYYY")
+        await update.message.reply_text("❌ Error. Use: /add Name DD-MM-YYYY or /add Name DD-MM")
 
 
 async def cmd_bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -120,7 +139,7 @@ async def cmd_bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not lines:
         await update.message.reply_text(
             "Send one birthday per line after the command:\n"
-                "/bulkadd\nAlice 15-03-1990\nBob 22-07-1985"
+                "/bulkadd\nAlice 15-03-1990\nBob 22-07"
         )
         return
 
@@ -131,19 +150,18 @@ async def cmd_bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for line in lines:
         parts = line.split()
         if len(parts) < 2:
-            errors.append(f"❌ '{line}' — use: Name DD-MM-YYYY")
+            errors.append(f"❌ '{line}' — use: Name DD-MM-YYYY or Name DD-MM")
             continue
         name, bday = parts[0], parts[1]
         try:
-            parsed = datetime.strptime(bday, "%d-%m-%Y")
-            bday_db = parsed.strftime("%Y-%m-%d")
+            bday_db, bday_display = parse_birthday(bday)
             cursor.execute(
                 "INSERT INTO birthdays (user_id, name, birthday) VALUES (%s, %s, %s)",
                 (chat_id, name, bday_db),
             )
-            added.append(f"✅ {name} ({bday})")
+            added.append(f"✅ {name} ({bday_display})")
         except ValueError:
-            errors.append(f"❌ '{line}' — invalid date, use DD-MM-YYYY")
+            errors.append(f"❌ '{line}' — invalid date, use DD-MM-YYYY or DD-MM")
 
     conn.commit()
     cursor.close()
@@ -168,10 +186,10 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         if not rows:
-            await update.message.reply_text("No birthdays saved yet. Use /add Name DD-MM-YYYY")
+            await update.message.reply_text("No birthdays saved yet. Use /add Name DD-MM-YYYY or /add Name DD-MM")
             return
 
-        lines = [f"🎂 {r['name']}: {r['birthday'].strftime('%d-%m-%Y')}" for r in rows]
+        lines = [f"🎂 {r['name']}: {format_birthday(r['birthday'])}" for r in rows]
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
         logging.error("/list failed: %s", e)
