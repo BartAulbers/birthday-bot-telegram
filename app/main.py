@@ -108,7 +108,8 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if len(context.args) < 2:
             raise ValueError("Missing arguments")
-        name, bday = context.args[0], context.args[1]
+        name = " ".join(context.args[:-1])
+        bday = context.args[-1]
         bday_db, bday_display = parse_birthday(bday)
 
         conn = get_db_connection()
@@ -152,7 +153,8 @@ async def cmd_bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(parts) < 2:
             errors.append(f"❌ '{line}' — use: Name DD-MM-YYYY or Name DD-MM")
             continue
-        name, bday = parts[0], parts[1]
+        name = " ".join(parts[:-1])
+        bday = parts[-1]
         try:
             bday_db, bday_display = parse_birthday(bday)
             cursor.execute(
@@ -201,7 +203,7 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not context.args:
             raise ValueError("Missing name")
-        name = context.args[0]
+        name = " ".join(context.args)
 
         conn = get_db_connection()
         cursor = conn.cursor()
