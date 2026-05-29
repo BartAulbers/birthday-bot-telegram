@@ -1,5 +1,3 @@
-flask
+python-telegram-bot[job-queue]
 mysql-connector-python
-apscheduler
-requests
 python-dotenv
