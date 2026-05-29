@@ -17,4 +17,4 @@ venv/
 debug.log
 
 # Docker/runtime data
-mysql_data/
+# mysql_data/ is now a named Docker volume, not a local directory

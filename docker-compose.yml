@@ -10,7 +10,7 @@ services:
       MYSQL_USER: ${DB_USER:-bot_admin}
       MYSQL_PASSWORD: ${DB_PASSWORD:-change_me}
     volumes:
-      - ./mysql_data:/var/lib/mysql
+      - mysql_data:/var/lib/mysql
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 10s
@@ -34,3 +34,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+volumes:
+  mysql_data:
