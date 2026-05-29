@@ -78,9 +78,15 @@ def init_database():
             """
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id VARCHAR(100) PRIMARY KEY,
-                reminder_days INT NOT NULL DEFAULT 0
+                reminder_days INT NOT NULL DEFAULT 0,
+                notification_time VARCHAR(5) NOT NULL DEFAULT '09:00'
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """
+        )
+        # Migrate existing deployments that may not have the notification_time column yet
+        cursor.execute(
+            "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS "
+            "notification_time VARCHAR(5) NOT NULL DEFAULT '09:00';"
         )
         conn.commit()
         cursor.close()
@@ -99,7 +105,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/list — show all saved birthdays\n"
         "/remove Name — delete a birthday\n"
         "/setreminder <days> — get reminded N days before a birthday\n"
-        "/reminder — show your current reminder setting"
+        "/settime HH:MM — set the time to receive daily reminders\n"
+        "/reminder — show your current reminder settings"
     )
 
 
@@ -179,8 +186,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
-            "SELECT name, birthday FROM birthdays WHERE user_id = %s "
-            "ORDER BY DATE_FORMAT(birthday, '%%m-%%d')",
+            "SELECT name, birthday FROM birthdays WHERE user_id = %s",
             (chat_id,),
         )
         rows = cursor.fetchall()
@@ -191,7 +197,27 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No birthdays saved yet. Use /add Name DD-MM-YYYY or /add Name DD-MM")
             return
 
-        lines = [f"🎂 {r['name']}: {format_birthday(r['birthday'])}" for r in rows]
+        today = datetime.now(tz=TZ)
+        today_mmdd = today.strftime("%m-%d")
+
+        # Sort upcoming birthdays first (from today), then wrap to start of year
+        rows.sort(key=lambda r: (
+            r["birthday"].strftime("%m-%d") < today_mmdd,
+            r["birthday"].strftime("%m-%d"),
+        ))
+
+        # Build list with a "── Vandaag ──" marker at today's position
+        lines = []
+        marker_placed = False
+        for r in rows:
+            mmdd = r["birthday"].strftime("%m-%d")
+            if not marker_placed and mmdd >= today_mmdd:
+                lines.append(f"── Vandaag ({today.strftime('%d-%m')}) ──")
+                marker_placed = True
+            lines.append(f"🎂 {r['name']}: {format_birthday(r['birthday'])}")
+        if not marker_placed:
+            lines.append(f"── Vandaag ({today.strftime('%d-%m')}) ──")
+
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
         logging.error("/list failed: %s", e)
@@ -257,74 +283,117 @@ async def cmd_setreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error. Use: /setreminder <days>  (e.g. /setreminder 7)")
 
 
+async def cmd_settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set the time of day to receive birthday reminders."""
+    chat_id = str(update.effective_chat.id)
+    try:
+        if not context.args:
+            raise ValueError("Missing time")
+        time_str = context.args[0]
+        datetime.strptime(time_str, "%H:%M")  # validate format
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO user_settings (user_id, notification_time) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE notification_time = %s",
+            (chat_id, time_str, time_str),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        await update.message.reply_text(f"🕘 Reminder time set to {time_str}.")
+    except Exception as e:
+        logging.warning("/settime failed: %s", e)
+        await update.message.reply_text("❌ Error. Use: /settime HH:MM  (e.g. /settime 08:30)")
+
+
 async def cmd_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current advance reminder setting."""
+    """Show current reminder settings."""
     chat_id = str(update.effective_chat.id)
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
-            "SELECT reminder_days FROM user_settings WHERE user_id = %s", (chat_id,)
+            "SELECT reminder_days, notification_time FROM user_settings WHERE user_id = %s",
+            (chat_id,),
         )
         row = cursor.fetchone()
         cursor.close()
         conn.close()
 
         days = row["reminder_days"] if row else 0
-        if days == 0:
-            await update.message.reply_text("⏰ No advance reminder set. Use /setreminder <days>")
-        else:
-            await update.message.reply_text(
-                f"⏰ You're reminded {days} day{'s' if days != 1 else ''} before each birthday."
-            )
+        notif_time = row["notification_time"] if row else "09:00"
+
+        advance = (
+            f"advance reminder: {days} day{'s' if days != 1 else ''} before"
+            if days > 0 else "no advance reminder"
+        )
+        await update.message.reply_text(
+            f"⏰ Reminder time: {notif_time}\n"
+            f"📅 {advance}\n\n"
+            f"Change with /settime HH:MM or /setreminder <days>"
+        )
     except Exception as e:
         logging.error("/reminder failed: %s", e)
-        await update.message.reply_text("❌ Could not retrieve reminder setting.")
+        await update.message.reply_text("❌ Could not retrieve reminder settings.")
 
 
 # --- Scheduled job ---
 
 async def check_birthdays(context: ContextTypes.DEFAULT_TYPE):
-    """Runs daily at 09:00 to send birthday reminders and configurable advance reminders."""
-    today = datetime.now(tz=TZ)
-    today_mmdd = today.strftime("%m-%d")
-    logging.info("Running birthday check for %s", today_mmdd)
+    """Runs every minute. Sends reminders to users whose configured notification time matches now."""
+    now = datetime.now(tz=TZ)
+    current_time = now.strftime("%H:%M")
+    today_mmdd = now.strftime("%m-%d")
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
-        # On-the-day reminders for all users
+        # Get all users with at least one birthday, with their settings (defaults: 09:00, 0 days)
         cursor.execute(
-            "SELECT user_id, name FROM birthdays "
-            "WHERE DATE_FORMAT(birthday, '%%m-%%d') = %s",
-            (today_mmdd,),
+            "SELECT DISTINCT b.user_id, "
+            "COALESCE(s.notification_time, '09:00') AS notification_time, "
+            "COALESCE(s.reminder_days, 0) AS reminder_days "
+            "FROM birthdays b LEFT JOIN user_settings s ON b.user_id = s.user_id"
         )
-        for row in cursor.fetchall():
-            await context.bot.send_message(
-                chat_id=row["user_id"],
-                text=f"🎂 It's {row['name']}'s birthday today!",
-            )
+        users = [u for u in cursor.fetchall() if u["notification_time"] == current_time]
 
-        # Advance reminders for users who configured them
-        cursor.execute(
-            "SELECT b.user_id, b.name, b.birthday, s.reminder_days "
-            "FROM birthdays b "
-            "JOIN user_settings s ON b.user_id = s.user_id "
-            "WHERE s.reminder_days > 0"
-        )
-        for row in cursor.fetchall():
-            advance_date = today + timedelta(days=row["reminder_days"])
-            if row["birthday"].strftime("%m-%d") == advance_date.strftime("%m-%d"):
-                days = row["reminder_days"]
-                bday_str = advance_date.strftime("%d-%m")
+        for user in users:
+            user_id = user["user_id"]
+            logging.info("Running birthday check for user %s at %s", user_id, current_time)
+
+            # On-the-day reminders
+            cursor.execute(
+                "SELECT name FROM birthdays WHERE user_id = %s "
+                "AND DATE_FORMAT(birthday, '%%m-%%d') = %s",
+                (user_id, today_mmdd),
+            )
+            for row in cursor.fetchall():
                 await context.bot.send_message(
-                    chat_id=row["user_id"],
-                    text=(
-                        f"⏰ Heads up: {row['name']}'s birthday is in "
-                        f"{days} day{'s' if days != 1 else ''} ({bday_str})!"
-                    ),
+                    chat_id=user_id,
+                    text=f"🎂 Het is vandaag de verjaardag van {row['name']}!",
                 )
+
+            # Advance reminders
+            if user["reminder_days"] > 0:
+                advance_date = now + timedelta(days=user["reminder_days"])
+                cursor.execute(
+                    "SELECT name FROM birthdays WHERE user_id = %s "
+                    "AND DATE_FORMAT(birthday, '%%m-%%d') = %s",
+                    (user_id, advance_date.strftime("%m-%d")),
+                )
+                days = user["reminder_days"]
+                for row in cursor.fetchall():
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            f"⏰ Reminder: de verjaardag van {row['name']} is over "
+                            f"{days} dag{'en' if days != 1 else ''} ({advance_date.strftime('%d-%m')})!"
+                        ),
+                    )
 
         cursor.close()
         conn.close()
@@ -349,12 +418,11 @@ def main():
     application.add_handler(CommandHandler("list", cmd_list))
     application.add_handler(CommandHandler("remove", cmd_remove))
     application.add_handler(CommandHandler("setreminder", cmd_setreminder))
+    application.add_handler(CommandHandler("settime", cmd_settime))
     application.add_handler(CommandHandler("reminder", cmd_reminder))
 
-    application.job_queue.run_daily(
-        check_birthdays,
-        time=datetime.now(tz=TZ).replace(hour=9, minute=0, second=0, microsecond=0).timetz(),
-    )
+    # Check every minute; only notifies users whose configured time matches current HH:MM
+    application.job_queue.run_repeating(check_birthdays, interval=60, first=10)
 
     logging.info("Bot started in polling mode (timezone: %s)", TZ)
     application.run_polling(drop_pending_updates=True)
