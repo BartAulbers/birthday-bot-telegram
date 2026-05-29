@@ -6,8 +6,8 @@ A self-hosted Telegram bot that stores birthdays in a MariaDB database and sends
 
 ## Features
 
-- `/add Name YYYY-MM-DD` — save a birthday
-- `/bulkadd` — save multiple birthdays at once (one per line)
+- `/add Name DD-MM-YYYY` — save a birthday
+- `/bulkadd` — save multiple birthdays at once (one per line, `Name DD-MM-YYYY`)
 - `/list` — view all saved birthdays (sorted by date)
 - `/remove Name` — delete a birthday
 - `/setreminder <days>` — get an advance reminder N days before each birthday
@@ -93,8 +93,8 @@ docker-compose.yml
 | Command | Description |
 |---|---|
 | `/start` or `/help` | Show available commands |
-| `/add Name YYYY-MM-DD` | Save a birthday |
-| `/bulkadd` | Save multiple birthdays — send one `Name YYYY-MM-DD` per line after the command |
+| `/add Name DD-MM-YYYY` | Save a birthday |
+| `/bulkadd` | Save multiple birthdays — send one `Name DD-MM-YYYY` per line after the command |
 | `/list` | List all birthdays |
 | `/remove Name` | Remove a birthday by name |
 | `/setreminder <days>` | Get reminded N days before each birthday (e.g. `/setreminder 7`). Use `0` to disable. |

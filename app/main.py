@@ -74,7 +74,7 @@ def init_database():
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎂 Birthday Bot\n\n"
-        "/add Name YYYY-MM-DD — save a birthday\n"
+        "/add Name DD-MM-YYYY — save a birthday\n"
         "/bulkadd — save multiple birthdays at once\n"
         "/list — show all saved birthdays\n"
         "/remove Name — delete a birthday\n"
@@ -89,13 +89,14 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.args) < 2:
             raise ValueError("Missing arguments")
         name, bday = context.args[0], context.args[1]
-        datetime.strptime(bday, "%Y-%m-%d")
+        parsed = datetime.strptime(bday, "%d-%m-%Y")
+        bday_db = parsed.strftime("%Y-%m-%d")
 
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO birthdays (user_id, name, birthday) VALUES (%s, %s, %s)",
-            (chat_id, name, bday),
+            (chat_id, name, bday_db),
         )
         conn.commit()
         cursor.close()
@@ -104,7 +105,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Saved {name}'s birthday ({bday})!")
     except Exception as e:
         logging.warning("/add failed: %s", e)
-        await update.message.reply_text("❌ Error. Use: /add Name YYYY-MM-DD")
+        await update.message.reply_text("❌ Error. Use: /add Name DD-MM-YYYY")
 
 
 async def cmd_bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -119,7 +120,7 @@ async def cmd_bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not lines:
         await update.message.reply_text(
             "Send one birthday per line after the command:\n"
-            "/bulkadd\nAlice 1990-03-15\nBob 1985-07-22"
+                "/bulkadd\nAlice 15-03-1990\nBob 22-07-1985"
         )
         return
 
@@ -130,18 +131,19 @@ async def cmd_bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for line in lines:
         parts = line.split()
         if len(parts) < 2:
-            errors.append(f"❌ '{line}' — use: Name YYYY-MM-DD")
+            errors.append(f"❌ '{line}' — use: Name DD-MM-YYYY")
             continue
         name, bday = parts[0], parts[1]
         try:
-            datetime.strptime(bday, "%Y-%m-%d")
+            parsed = datetime.strptime(bday, "%d-%m-%Y")
+            bday_db = parsed.strftime("%Y-%m-%d")
             cursor.execute(
                 "INSERT INTO birthdays (user_id, name, birthday) VALUES (%s, %s, %s)",
-                (chat_id, name, bday),
+                (chat_id, name, bday_db),
             )
             added.append(f"✅ {name} ({bday})")
         except ValueError:
-            errors.append(f"❌ '{line}' — invalid date, use YYYY-MM-DD")
+            errors.append(f"❌ '{line}' — invalid date, use DD-MM-YYYY")
 
     conn.commit()
     cursor.close()
@@ -166,10 +168,10 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         if not rows:
-            await update.message.reply_text("No birthdays saved yet. Use /add Name YYYY-MM-DD")
+            await update.message.reply_text("No birthdays saved yet. Use /add Name DD-MM-YYYY")
             return
 
-        lines = [f"🎂 {r['name']}: {r['birthday'].strftime('%d %b %Y')}" for r in rows]
+        lines = [f"🎂 {r['name']}: {r['birthday'].strftime('%d-%m-%Y')}" for r in rows]
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
         logging.error("/list failed: %s", e)
@@ -295,7 +297,7 @@ async def check_birthdays(context: ContextTypes.DEFAULT_TYPE):
             advance_date = today + timedelta(days=row["reminder_days"])
             if row["birthday"].strftime("%m-%d") == advance_date.strftime("%m-%d"):
                 days = row["reminder_days"]
-                bday_str = advance_date.strftime("%d %b")
+                bday_str = advance_date.strftime("%d-%m")
                 await context.bot.send_message(
                     chat_id=row["user_id"],
                     text=(
