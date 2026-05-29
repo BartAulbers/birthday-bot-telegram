@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import mysql.connector
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from telegram import Update
@@ -39,7 +39,7 @@ def get_db_connection(retries=5, delay_seconds=2):
 
 
 def init_database():
-    """Ensures the required table exists on startup, retrying until the DB is ready."""
+    """Ensures all required tables exist on startup, retrying until the DB is ready."""
     conn = get_db_connection(retries=20, delay_seconds=3)
     try:
         cursor = conn.cursor()
@@ -51,6 +51,14 @@ def init_database():
                 name VARCHAR(255) NOT NULL,
                 birthday DATE NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id VARCHAR(100) PRIMARY KEY,
+                reminder_days INT NOT NULL DEFAULT 0
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """
         )
@@ -67,8 +75,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎂 Birthday Bot\n\n"
         "/add Name YYYY-MM-DD — save a birthday\n"
+        "/bulkadd — save multiple birthdays at once\n"
         "/list — show all saved birthdays\n"
-        "/remove Name — delete a birthday"
+        "/remove Name — delete a birthday\n"
+        "/setreminder <days> — get reminded N days before a birthday\n"
+        "/reminder — show your current reminder setting"
     )
 
 
@@ -94,6 +105,50 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning("/add failed: %s", e)
         await update.message.reply_text("❌ Error. Use: /add Name YYYY-MM-DD")
+
+
+async def cmd_bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Accepts multiple birthdays, one per line after the command:
+        /bulkadd
+        Alice 1990-03-15
+        Bob 1985-07-22
+    """
+    chat_id = str(update.effective_chat.id)
+    lines = [l.strip() for l in update.message.text.split("\n")[1:] if l.strip()]
+
+    if not lines:
+        await update.message.reply_text(
+            "Send one birthday per line after the command:\n"
+            "/bulkadd\nAlice 1990-03-15\nBob 1985-07-22"
+        )
+        return
+
+    added, errors = [], []
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2:
+            errors.append(f"❌ '{line}' — use: Name YYYY-MM-DD")
+            continue
+        name, bday = parts[0], parts[1]
+        try:
+            datetime.strptime(bday, "%Y-%m-%d")
+            cursor.execute(
+                "INSERT INTO birthdays (user_id, name, birthday) VALUES (%s, %s, %s)",
+                (chat_id, name, bday),
+            )
+            added.append(f"✅ {name} ({bday})")
+        except ValueError:
+            errors.append(f"❌ '{line}' — invalid date, use YYYY-MM-DD")
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    summary = "\n".join(added + errors)
+    await update.message.reply_text(summary or "Nothing to add.")
 
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,28 +203,109 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error. Use: /remove Name")
 
 
-# --- Scheduled job ---
+async def cmd_setreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set how many days in advance to receive a birthday reminder (0 = disabled)."""
+    chat_id = str(update.effective_chat.id)
+    try:
+        if not context.args:
+            raise ValueError("Missing argument")
+        days = int(context.args[0])
+        if days < 0:
+            raise ValueError("Days must be 0 or positive")
 
-async def check_birthdays(context: ContextTypes.DEFAULT_TYPE):
-    """Runs daily at 09:00 (local timezone) to send birthday reminders."""
-    today = datetime.now(tz=TZ).strftime("%m-%d")
-    logging.info("Running birthday check for %s", today)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO user_settings (user_id, reminder_days) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE reminder_days = %s",
+            (chat_id, days, days),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        if days == 0:
+            await update.message.reply_text("⏰ Advance reminders disabled.")
+        else:
+            await update.message.reply_text(
+                f"⏰ You'll be reminded {days} day{'s' if days != 1 else ''} before each birthday."
+            )
+    except Exception as e:
+        logging.warning("/setreminder failed: %s", e)
+        await update.message.reply_text("❌ Error. Use: /setreminder <days>  (e.g. /setreminder 7)")
+
+
+async def cmd_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current advance reminder setting."""
+    chat_id = str(update.effective_chat.id)
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
-            "SELECT user_id, name FROM birthdays WHERE DATE_FORMAT(birthday, '%%m-%%d') = %s",
-            (today,),
+            "SELECT reminder_days FROM user_settings WHERE user_id = %s", (chat_id,)
         )
-        rows = cursor.fetchall()
+        row = cursor.fetchone()
         cursor.close()
         conn.close()
 
-        for row in rows:
+        days = row["reminder_days"] if row else 0
+        if days == 0:
+            await update.message.reply_text("⏰ No advance reminder set. Use /setreminder <days>")
+        else:
+            await update.message.reply_text(
+                f"⏰ You're reminded {days} day{'s' if days != 1 else ''} before each birthday."
+            )
+    except Exception as e:
+        logging.error("/reminder failed: %s", e)
+        await update.message.reply_text("❌ Could not retrieve reminder setting.")
+
+
+# --- Scheduled job ---
+
+async def check_birthdays(context: ContextTypes.DEFAULT_TYPE):
+    """Runs daily at 09:00 to send birthday reminders and configurable advance reminders."""
+    today = datetime.now(tz=TZ)
+    today_mmdd = today.strftime("%m-%d")
+    logging.info("Running birthday check for %s", today_mmdd)
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        # On-the-day reminders for all users
+        cursor.execute(
+            "SELECT user_id, name FROM birthdays "
+            "WHERE DATE_FORMAT(birthday, '%%m-%%d') = %s",
+            (today_mmdd,),
+        )
+        for row in cursor.fetchall():
             await context.bot.send_message(
                 chat_id=row["user_id"],
-                text=f"🎂 Reminder: It's {row['name']}'s birthday today!",
+                text=f"🎂 It's {row['name']}'s birthday today!",
             )
+
+        # Advance reminders for users who configured them
+        cursor.execute(
+            "SELECT b.user_id, b.name, b.birthday, s.reminder_days "
+            "FROM birthdays b "
+            "JOIN user_settings s ON b.user_id = s.user_id "
+            "WHERE s.reminder_days > 0"
+        )
+        for row in cursor.fetchall():
+            advance_date = today + timedelta(days=row["reminder_days"])
+            if row["birthday"].strftime("%m-%d") == advance_date.strftime("%m-%d"):
+                days = row["reminder_days"]
+                bday_str = advance_date.strftime("%d %b")
+                await context.bot.send_message(
+                    chat_id=row["user_id"],
+                    text=(
+                        f"⏰ Heads up: {row['name']}'s birthday is in "
+                        f"{days} day{'s' if days != 1 else ''} ({bday_str})!"
+                    ),
+                )
+
+        cursor.close()
+        conn.close()
     except Exception as e:
         logging.error("Birthday check failed: %s", e)
 
@@ -187,10 +323,12 @@ def main():
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_start))
     application.add_handler(CommandHandler("add", cmd_add))
+    application.add_handler(CommandHandler("bulkadd", cmd_bulkadd))
     application.add_handler(CommandHandler("list", cmd_list))
     application.add_handler(CommandHandler("remove", cmd_remove))
+    application.add_handler(CommandHandler("setreminder", cmd_setreminder))
+    application.add_handler(CommandHandler("reminder", cmd_reminder))
 
-    # Schedule daily birthday check at 09:00 local time
     application.job_queue.run_daily(
         check_birthdays,
         time=datetime.now(tz=TZ).replace(hour=9, minute=0, second=0, microsecond=0).timetz(),
