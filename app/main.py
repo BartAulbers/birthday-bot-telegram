@@ -509,6 +509,24 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
             user_id = user["user_id"]
             logging.info("Checking birthdays for user %s", user_id)
 
+            # Debug: Show ALL birthdays for this user with their formatted dates
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                "SELECT name, birthday, DATE_FORMAT(birthday, '%%m-%%d') as mmdd FROM birthdays WHERE user_id = %s",
+                (user_id,),
+            )
+            all_birthdays = cursor.fetchall()
+            cursor.close()
+            
+            if all_birthdays:
+                logging.info("DEBUG: All birthdays for user %s:", user_id)
+                for b in all_birthdays:
+                    logging.info("  - %s: stored as %s, MM-DD format: %s", b['name'], b['birthday'], b['mmdd'])
+            else:
+                logging.info("DEBUG: No birthdays at all found for user %s", user_id)
+            
+            logging.info("DEBUG: Looking for birthdays matching MM-DD format: %s", today_mmdd)
+
             # On-the-day reminders
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
