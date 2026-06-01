@@ -426,14 +426,35 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         row = cursor.fetchone()
         cursor.close()
-        conn.close()
         
         notification_time = row["notification_time"] if row else "09:00"
         
-        await update.message.reply_text(
-            f"🧪 Testing birthday notification workflow for time: {notification_time}...\n"
-            "Check logs for detailed output."
+        # Debug: Show all birthdays for this user
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT name, birthday, DATE_FORMAT(birthday, '%%m-%%d') as mmdd FROM birthdays WHERE user_id = %s ORDER BY birthday",
+            (chat_id,),
         )
+        birthdays = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        debug_msg = f"🧪 Test Results:\n"
+        debug_msg += f"Notification time: {notification_time}\n"
+        debug_msg += f"Birthdays in database: {len(birthdays)}\n"
+        
+        if birthdays:
+            debug_msg += "\nYour birthdays:\n"
+            for b in birthdays:
+                debug_msg += f"  • {b['name']}: {b['birthday']} (MM-DD: {b['mmdd']})\n"
+        else:
+            debug_msg += "⚠️ No birthdays found in database!\n"
+        
+        now = datetime.now(tz=TZ)
+        today_mmdd = now.strftime("%m-%d")
+        debug_msg += f"\nToday's date: {now.strftime('%Y-%m-%d')} (MM-DD: {today_mmdd})\n"
+        
+        await update.message.reply_text(debug_msg)
         
         logging.info("TEST: Running manual birthday check for user %s at time %s", chat_id, notification_time)
         
