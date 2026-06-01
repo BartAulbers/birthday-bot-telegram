@@ -47,6 +47,11 @@ try:
 except Exception as e:
     print(f"✗ Failed to set up file logging to {log_path}: {e}", flush=True)
 
+# Suppress noisy third-party library logs
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 TZ = ZoneInfo(os.getenv("TZ", "Europe/Amsterdam"))
 ALLOWED_NOTIFICATION_TIMES = ["09:00", "13:00", "17:00"]
