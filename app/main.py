@@ -395,6 +395,44 @@ async def cmd_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Could not retrieve reminder settings.")
 
 
+async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hidden test command: runs the birthday check immediately."""
+    chat_id = str(update.effective_chat.id)
+    try:
+        # Get the user's notification time (or default to 09:00)
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT COALESCE(notification_time, '09:00') AS notification_time FROM user_settings WHERE user_id = %s",
+            (chat_id,),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        notification_time = row["notification_time"] if row else "09:00"
+        
+        await update.message.reply_text(
+            f"🧪 Testing birthday notification workflow for time: {notification_time}...\n"
+            "Check logs for detailed output."
+        )
+        
+        logging.info("TEST: Running manual birthday check for user %s at time %s", chat_id, notification_time)
+        
+        # Create a minimal context object for the test
+        from telegram.ext import ContextTypes as CT
+        from telegram import Bot
+        test_context = CT.DEFAULT_TYPE()
+        test_context._bot = context.bot
+        
+        await check_birthdays_at_time(test_context, notification_time)
+        
+        logging.info("TEST: Completed manual birthday check for user %s", chat_id)
+    except Exception as e:
+        logging.error("TEST command failed: %s", e, exc_info=True)
+        await update.message.reply_text(f"❌ Test failed. Check logs for details.")
+
+
 # --- Scheduled job ---
 
 async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notification_time: str):
@@ -503,6 +541,7 @@ def main():
     application.add_handler(CommandHandler("setreminder", cmd_setreminder))
     application.add_handler(CommandHandler("settime", cmd_settime))
     application.add_handler(CommandHandler("reminder", cmd_reminder))
+    application.add_handler(CommandHandler("test", cmd_test))  # Hidden test command
 
     # Schedule daily jobs for each unique notification time
     schedule_notification_jobs(application)
