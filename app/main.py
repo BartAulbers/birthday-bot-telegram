@@ -12,33 +12,51 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 load_dotenv()
 
 # Create logs directory if it doesn't exist
-os.makedirs("/app/logs", exist_ok=True)
+try:
+    os.makedirs("/app/logs", exist_ok=True)
+    log_path = "/app/logs/bot.log"
+except Exception as e:
+    print(f"Failed to create /app/logs directory: {e}", flush=True)
+    print("Falling back to current directory for logs", flush=True)
+    os.makedirs("./logs", exist_ok=True)
+    log_path = "./logs/bot.log"
 
 # Configure logging to write to both console and file
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture everything
 
-# Console handler
+# Console handler (stderr for docker logs visibility)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
-console_formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+console_formatter = logging.Formatter("%(asctime)s %(levelname)s [%(funcName)s] %(message)s")
 console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
 # File handler (rotating logs to prevent huge files)
-file_handler = logging.handlers.RotatingFileHandler(
-    "/app/logs/bot.log",
-    maxBytes=10 * 1024 * 1024,  # 10 MB
-    backupCount=5,  # Keep 5 backup files
-)
-file_handler.setLevel(logging.INFO)
-file_formatter = logging.Formatter("%(asctime)s %(levelname)s [%(funcName)s] %(message)s")
-file_handler.setFormatter(file_formatter)
-logger.addHandler(file_handler)
+try:
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path,
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,  # Keep 5 backup files
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter("%(asctime)s %(levelname)s [%(funcName)s:%(lineno)d] %(message)s")
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    print(f"✓ Logging to {log_path}", flush=True)
+except Exception as e:
+    print(f"✗ Failed to set up file logging to {log_path}: {e}", flush=True)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 TZ = ZoneInfo(os.getenv("TZ", "Europe/Amsterdam"))
 ALLOWED_NOTIFICATION_TIMES = ["09:00", "13:00", "17:00"]
+
+# Log startup
+logging.info("=" * 60)
+logging.info("🤖 Birthday Bot Starting")
+logging.info("Timezone: %s", TZ)
+logging.info("Allowed notification times: %s", ", ".join(ALLOWED_NOTIFICATION_TIMES))
+logging.info("=" * 60)
 
 
 def parse_birthday(text: str) -> tuple[str, str]:
