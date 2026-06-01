@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import mysql.connector
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as datetime_time
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from telegram import Update
@@ -14,6 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 TZ = ZoneInfo(os.getenv("TZ", "Europe/Amsterdam"))
+ALLOWED_NOTIFICATION_TIMES = ["09:00", "13:00", "17:00"]
 
 
 def parse_birthday(text: str) -> tuple[str, str]:
@@ -95,6 +96,21 @@ def init_database():
         conn.close()
 
 
+def schedule_notification_jobs(application: Application):
+    """Schedules birthday checks at the three allowed notification times."""
+    for notification_time in ALLOWED_NOTIFICATION_TIMES:
+        try:
+            hour, minute = map(int, notification_time.split(":"))
+            application.job_queue.run_daily(
+                lambda ctx, t=notification_time: check_birthdays_at_time(ctx, t),
+                time=datetime_time(hour, minute, tzinfo=TZ),
+                name=f"birthday_check_{notification_time}",
+            )
+            logging.info("Scheduled birthday check for %s daily", notification_time)
+        except ValueError:
+            logging.warning("Invalid notification time format: %s", notification_time)
+
+
 # --- Command handlers ---
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,7 +121,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/list — show all saved birthdays\n"
         "/remove Name — delete a birthday\n"
         "/setreminder <days> — get reminded N days before a birthday\n"
-        "/settime HH:MM — set the time to receive daily reminders\n"
+        "/settime <09:00|13:00|17:00> — set the time to receive daily reminders\n"
         "/reminder — show your current reminder settings"
     )
 
@@ -284,12 +300,19 @@ async def cmd_setreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set the time of day to receive birthday reminders."""
+    """Set the time of day to receive birthday reminders. Only 09:00, 13:00, 17:00 allowed."""
     chat_id = str(update.effective_chat.id)
     try:
         if not context.args:
             raise ValueError("Missing time")
         time_str = context.args[0]
+        
+        if time_str not in ALLOWED_NOTIFICATION_TIMES:
+            await update.message.reply_text(
+                f"❌ Invalid time. Allowed times: {', '.join(ALLOWED_NOTIFICATION_TIMES)}"
+            )
+            return
+        
         datetime.strptime(time_str, "%H:%M")  # validate format
 
         conn = get_db_connection()
@@ -306,7 +329,9 @@ async def cmd_settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🕘 Reminder time set to {time_str}.")
     except Exception as e:
         logging.warning("/settime failed: %s", e)
-        await update.message.reply_text("❌ Error. Use: /settime HH:MM  (e.g. /settime 08:30)")
+        await update.message.reply_text(
+            f"❌ Error. Use: /settime <time>. Allowed: {', '.join(ALLOWED_NOTIFICATION_TIMES)}"
+        )
 
 
 async def cmd_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -342,36 +367,46 @@ async def cmd_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Scheduled job ---
 
-async def check_birthdays(context: ContextTypes.DEFAULT_TYPE):
-    """Runs every minute. Sends reminders to users whose configured notification time matches now."""
+async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notification_time: str):
+    """Checks birthdays for users who want notifications at the given time (HH:MM)."""
     now = datetime.now(tz=TZ)
-    current_time = now.strftime("%H:%M")
     today_mmdd = now.strftime("%m-%d")
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
-        # Get all users with at least one birthday, with their settings (defaults: 09:00, 0 days)
+        # Fetch only users with this specific notification time
         cursor.execute(
             "SELECT DISTINCT b.user_id, "
-            "COALESCE(s.notification_time, '09:00') AS notification_time, "
             "COALESCE(s.reminder_days, 0) AS reminder_days "
-            "FROM birthdays b LEFT JOIN user_settings s ON b.user_id = s.user_id"
+            "FROM birthdays b LEFT JOIN user_settings s ON b.user_id = s.user_id "
+            "WHERE COALESCE(s.notification_time, '09:00') = %s",
+            (notification_time,),
         )
-        users = [u for u in cursor.fetchall() if u["notification_time"] == current_time]
+        users = cursor.fetchall()
+        cursor.close()
+
+        if not users:
+            conn.close()
+            return
+
+        logging.info("Birthday check at %s: processing %d user(s)", notification_time, len(users))
 
         for user in users:
             user_id = user["user_id"]
-            logging.info("Running birthday check for user %s at %s", user_id, current_time)
 
             # On-the-day reminders
+            cursor = conn.cursor(dictionary=True)
             cursor.execute(
                 "SELECT name FROM birthdays WHERE user_id = %s "
                 "AND DATE_FORMAT(birthday, '%%m-%%d') = %s",
                 (user_id, today_mmdd),
             )
-            for row in cursor.fetchall():
+            birthdays_today = cursor.fetchall()
+            cursor.close()
+            
+            for row in birthdays_today:
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=f"🎂 Het is vandaag de verjaardag van {row['name']}!",
@@ -380,13 +415,17 @@ async def check_birthdays(context: ContextTypes.DEFAULT_TYPE):
             # Advance reminders
             if user["reminder_days"] > 0:
                 advance_date = now + timedelta(days=user["reminder_days"])
+                cursor = conn.cursor(dictionary=True)
                 cursor.execute(
                     "SELECT name FROM birthdays WHERE user_id = %s "
                     "AND DATE_FORMAT(birthday, '%%m-%%d') = %s",
                     (user_id, advance_date.strftime("%m-%d")),
                 )
+                advance_birthdays = cursor.fetchall()
+                cursor.close()
+                
                 days = user["reminder_days"]
-                for row in cursor.fetchall():
+                for row in advance_birthdays:
                     await context.bot.send_message(
                         chat_id=user_id,
                         text=(
@@ -395,10 +434,9 @@ async def check_birthdays(context: ContextTypes.DEFAULT_TYPE):
                         ),
                     )
 
-        cursor.close()
         conn.close()
     except Exception as e:
-        logging.error("Birthday check failed: %s", e)
+        logging.error("Birthday check at %s failed: %s", notification_time, e)
 
 
 # --- Entry point ---
@@ -421,8 +459,8 @@ def main():
     application.add_handler(CommandHandler("settime", cmd_settime))
     application.add_handler(CommandHandler("reminder", cmd_reminder))
 
-    # Check every minute; only notifies users whose configured time matches current HH:MM
-    application.job_queue.run_repeating(check_birthdays, interval=60, first=10)
+    # Schedule daily jobs for each unique notification time
+    schedule_notification_jobs(application)
 
     logging.info("Bot started in polling mode (timezone: %s)", TZ)
     application.run_polling(drop_pending_updates=True)
