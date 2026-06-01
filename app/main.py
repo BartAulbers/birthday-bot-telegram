@@ -437,7 +437,7 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Debug: Show all birthdays for this user
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
-            "SELECT name, birthday, DATE_FORMAT(birthday, '%%m-%%d') as mmdd FROM birthdays WHERE user_id = %s ORDER BY birthday",
+            "SELECT name, birthday, DATE_FORMAT(birthday, '%m-%d') as mmdd FROM birthdays WHERE user_id = %s ORDER BY birthday",
             (chat_id,),
         )
         birthdays = cursor.fetchall()
@@ -512,7 +512,7 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
             # Debug: Show ALL birthdays for this user with their formatted dates
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
-                "SELECT name, birthday, DATE_FORMAT(birthday, '%%m-%%d') as mmdd FROM birthdays WHERE user_id = %s",
+                "SELECT name, birthday, DATE_FORMAT(birthday, '%m-%d') as mmdd FROM birthdays WHERE user_id = %s",
                 (user_id,),
             )
             all_birthdays = cursor.fetchall()
@@ -531,7 +531,7 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
                 "SELECT name FROM birthdays WHERE user_id = %s "
-                "AND DATE_FORMAT(birthday, '%%m-%%d') = %s",
+                "AND DATE_FORMAT(birthday, '%m-%d') = %s",
                 (user_id, today_mmdd),
             )
             birthdays_today = cursor.fetchall()
@@ -553,7 +553,7 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
                 cursor = conn.cursor(dictionary=True)
                 cursor.execute(
                     "SELECT name FROM birthdays WHERE user_id = %s "
-                    "AND DATE_FORMAT(birthday, '%%m-%%d') = %s",
+                    "AND DATE_FORMAT(birthday, '%m-%d') = %s",
                     (user_id, advance_date.strftime("%m-%d")),
                 )
                 advance_birthdays = cursor.fetchall()
