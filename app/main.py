@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import logging.handlers
 import mysql.connector
 from datetime import datetime, timedelta, time as datetime_time
 from zoneinfo import ZoneInfo
@@ -10,7 +11,30 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Create logs directory if it doesn't exist
+os.makedirs("/app/logs", exist_ok=True)
+
+# Configure logging to write to both console and file
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+console_handler.setFormatter(console_formatter)
+logger.addHandler(console_handler)
+
+# File handler (rotating logs to prevent huge files)
+file_handler = logging.handlers.RotatingFileHandler(
+    "/app/logs/bot.log",
+    maxBytes=10 * 1024 * 1024,  # 10 MB
+    backupCount=5,  # Keep 5 backup files
+)
+file_handler.setLevel(logging.INFO)
+file_formatter = logging.Formatter("%(asctime)s %(levelname)s [%(funcName)s] %(message)s")
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 TZ = ZoneInfo(os.getenv("TZ", "Europe/Amsterdam"))
@@ -26,8 +50,14 @@ def parse_birthday(text: str) -> tuple[str, str]:
         return parsed.strftime("%Y-%m-%d"), text
     except ValueError:
         pass
-    parsed = datetime.strptime(text, "%d-%m")  # defaults to year 1900
-    return parsed.strftime("%Y-%m-%d"), text
+    
+    try:
+        parsed = datetime.strptime(text, "%d-%m")
+        # Explicitly set year to 1900 to avoid implicit conversion issues
+        parsed = parsed.replace(year=1900)
+        return parsed.strftime("%Y-%m-%d"), text
+    except ValueError as e:
+        raise ValueError(f"Invalid date format: {text}. Use DD-MM-YYYY or DD-MM") from e
 
 
 def format_birthday(date_obj) -> str:
@@ -371,6 +401,8 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
     """Checks birthdays for users who want notifications at the given time (HH:MM)."""
     now = datetime.now(tz=TZ)
     today_mmdd = now.strftime("%m-%d")
+    
+    logging.info("Starting birthday check for notification time: %s (current time: %s)", notification_time, now.strftime("%H:%M:%S"))
 
     try:
         conn = get_db_connection()
@@ -387,7 +419,10 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
         users = cursor.fetchall()
         cursor.close()
 
+        logging.info("Query returned %d user(s) for notification time %s", len(users) if users else 0, notification_time)
+
         if not users:
+            logging.info("No users found for notification time %s, skipping", notification_time)
             conn.close()
             return
 
@@ -395,6 +430,7 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
 
         for user in users:
             user_id = user["user_id"]
+            logging.info("Checking birthdays for user %s", user_id)
 
             # On-the-day reminders
             cursor = conn.cursor(dictionary=True)
@@ -406,11 +442,15 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
             birthdays_today = cursor.fetchall()
             cursor.close()
             
+            logging.info("Found %d birthdays today (date: %s) for user %s", len(birthdays_today) if birthdays_today else 0, today_mmdd, user_id)
+            
             for row in birthdays_today:
+                logging.info("Sending birthday message for %s to user %s", row['name'], user_id)
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=f"🎂 Het is vandaag de verjaardag van {row['name']}!",
                 )
+                logging.info("Successfully sent birthday message for %s to user %s", row['name'], user_id)
 
             # Advance reminders
             if user["reminder_days"] > 0:
@@ -424,8 +464,11 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
                 advance_birthdays = cursor.fetchall()
                 cursor.close()
                 
+                logging.info("Found %d advance birthdays for user %s (days ahead: %d)", len(advance_birthdays) if advance_birthdays else 0, user_id, user["reminder_days"])
+                
                 days = user["reminder_days"]
                 for row in advance_birthdays:
+                    logging.info("Sending advance reminder for %s to user %s", row['name'], user_id)
                     await context.bot.send_message(
                         chat_id=user_id,
                         text=(
@@ -433,10 +476,12 @@ async def check_birthdays_at_time(context: ContextTypes.DEFAULT_TYPE, notificati
                             f"{days} dag{'en' if days != 1 else ''} ({advance_date.strftime('%d-%m')})!"
                         ),
                     )
+                    logging.info("Successfully sent advance reminder for %s to user %s", row['name'], user_id)
 
         conn.close()
+        logging.info("Birthday check completed for notification time %s", notification_time)
     except Exception as e:
-        logging.error("Birthday check at %s failed: %s", notification_time, e)
+        logging.error("Birthday check at %s failed: %s", notification_time, e, exc_info=True)
 
 
 # --- Entry point ---

@@ -31,9 +31,12 @@ services:
       DB_USER: ${DB_USER:-bot_admin}
       DB_PASSWORD: ${DB_PASSWORD:-change_me}
       TZ: ${TZ:-Europe/Amsterdam}
+    volumes:
+      - bot_logs:/app/logs
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   mysql_data:
+  bot_logs:
