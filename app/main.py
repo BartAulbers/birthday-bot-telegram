@@ -437,13 +437,8 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         logging.info("TEST: Running manual birthday check for user %s at time %s", chat_id, notification_time)
         
-        # Create a minimal context object for the test
-        from telegram.ext import ContextTypes as CT
-        from telegram import Bot
-        test_context = CT.DEFAULT_TYPE()
-        test_context._bot = context.bot
-        
-        await check_birthdays_at_time(test_context, notification_time)
+        # Run the birthday check with the existing context (which has the bot)
+        await check_birthdays_at_time(context, notification_time)
         
         logging.info("TEST: Completed manual birthday check for user %s", chat_id)
     except Exception as e:
